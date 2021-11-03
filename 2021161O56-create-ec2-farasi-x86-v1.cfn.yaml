@@ -1,0 +1,398 @@
+---
+# "---" Indica el comiendzo de un documento YAML
+# Nombre Template: AWS-CFN-WAU-EC2-x86_64-BASE-V01
+# Creardo por: Alsenitd Rausseo & Rodolfo Sevillanos
+# Fecha de Creacion: 2021-ABR-15
+# Descripcion: Creacion de instancia EC2:
+#              Volume: Se agregar TAG a los Volumenes
+#              Instance Metadata Service v1: IMDSv2 (usar aws_cli_v2)
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'Creacion de Instancia EC2'
+# Metadata
+Metadata:
+  # Se puede definir su propia agrupación y ordenación de parámetros para que
+  # los usuarios puedan especificar de manera eficiente los valores de los parámetros.
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Configuracion de la VPC de WAU"
+        Parameters:
+          - VcpIdParameter
+          - Ec2Subnet
+          - Ec2InternalPrivateIp
+      - Label:
+          default: "Configuracion del Instancia EC2"
+        Parameters:
+          - Ec2InstanceType
+          - Ec2InstanceRootVolumeSize
+          - Ec2InstanceKeypairName
+          - Ec2InstanceAmiId
+    ParameterLabels:
+      VcpIdParameter:
+        default: 'Escoja la VPC a usar para la instancia EC2'
+      Ec2Subnet:
+        default: 'Escoja Subnet donde se configurara la instancia EC2'
+      Ec2InternalPrivateIp:
+        default: 'Ingrese una ip privada en formato x.x.x.x que pertenzca al CIDR de la subnet escogida para asignarsela a la instancia EC2'
+# Parameters
+Parameters:
+  # Definimos VPC a usar para la creacion de la instancia
+  VcpIdParameter:
+    Description: Escoger sobre que VPC lanzar la instancia
+    Type: AWS::EC2::VPC::Id
+  # Definimos la subnet sobre la cual se creara la instancia
+  Ec2Subnet:
+    Description: Escoger Subnet a donde se creara la instancia EC2.
+    Type: AWS::EC2::Subnet::Id
+  # Definimos la subnet sobre la cual se creara la instancia
+  Ec2InternalPrivateIp:
+    Description: Ingrese IP PRIVADA para asigna a instancia EC2.
+    Type: String
+    AllowedPattern:  (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})
+    ConstraintDescription: Formato de IP Privada x.x.x.x y este debe de pertenecer al CIDR de la subnet escogida para asignarsela a la instancia EC2
+  # Definimos el tipo de instancia a utlizar en EC2-INSTANCE
+  Ec2InstanceType:
+    Type: String
+    AllowedValues: [t3a.micro, t3a.small, t3a.medium, t3a.large, t3.micro, t3.small, t3.medium, t3.large]
+    Default: "t3a.micro"
+    Description: Indicar que tipo de instancia EC2 va a utilizar.
+    ConstraintDescription: "Debe ser un tipo de instancia EC2 válido."
+  # Definimos Storage para EC2-Instance root
+  Ec2InstanceRootVolumeSize:
+    Description: Tamaño del Volumen en GB
+    Type: Number
+    Default: 10
+    ConstraintDescription: Ingresar unicamente numero enteros que se encuentrand dentro de las opciones
+    AllowedValues: [10, 15, 20]
+  # Definimos el KeyName o bien KeyPair que vamos a utilizar
+  Ec2InstanceKeypairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Escoger el KeyPair a utilizar con instancia EC2
+    ConstraintDescription: Debe de ser el nombre de un EC2 KeyPair existente
+  # Definimos que AMI utilizaremos para el EC"-LSVPN-INSTANCE
+  Ec2InstanceAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+    Description: Se indica el tipo de AmiID a utilizar para la instancia EC2. El AmiID es Amazon Linux 2 con HVM para instancia x86_64 y GP2 (tipo de storage)
+    ConstraintDescription: De preferencia se utiliza una Amazon Linux 2 con GP2
+# Resources
+Resources:
+  # creacion iam role para instancia LSVPN
+  Ec2InstanceIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "Role for EC2 instances"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Path: /
+      Policies:
+        - PolicyName: TagInstancePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - 'ec2:Describe*'
+                  - 'ec2:CreateTags'
+                Resource: '*'
+        - PolicyName: AllowModifyIMDSv2
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - 'ec2:ModifyInstanceMetadataOptions'
+                Resource:
+                  - "arn:aws:ec2:*:*:instance/*"
+        - PolicyName: AllowGetObjectsWauAccount
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - 's3:GetObject'
+                Resource:
+                  - arn:aws:s3:::wau-cfn-templates/prod/*
+        - PolicyName: AllowUserToSeeBucketListInTheConsole
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - 's3:ListAllMyBuckets'
+                  - 's3:GetBucketLocation'
+                  - 's3:HeadBucket'
+                Resource:
+                  - arn:aws:s3:::*
+        - PolicyName: AllowS3BucketFarasiFiles
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - 's3:*'
+                Resource:
+                  - arn:aws:s3:::farasi-files
+                  - arn:aws:s3:::farasi-files/*
+  # Creamos Instance Profile el cual contiene el rol a utilizar para instancia
+  Ec2InstanceIamProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref Ec2InstanceIamRole
+  # CREACIO DEL SECURITY GROUP
+  Ec2InstanceSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${AWS::StackName}-SG"
+      GroupDescription: Security Group para uso con instancia EC2
+      VpcId: !Ref VcpIdParameter
+      SecurityGroupIngress:
+        - IpProtocol: '-1'
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 10.10.32.0/20
+          Description: Acceso permitido para CIDR AWS
+        - IpProtocol: '-1'
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 10.8.0.0/24
+          Description: Acceso permitido para CIDR OPENVPN
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+          Description: Acceso libre para salir a internet
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-SG"
+  # Creamos ENI la cual se le estara asignando a la instance EC2 para que
+  # tenga una EIP asignada y no cambien al momento de apagar la instancia.
+  Ec2Eni:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: Interface para uso con la instancia EC2
+      SubnetId: !Ref Ec2Subnet
+      PrivateIpAddresses:
+        - PrivateIpAddress: !Ref Ec2InternalPrivateIp
+          Primary: true
+      GroupSet:
+        # Asignamos el Security Group que Utilizariamos
+        - !Ref Ec2InstanceSg
+      SourceDestCheck: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-ENI"
+  # creamos instancia
+  Ec2Instance:
+    Type: AWS::EC2::Instance
+    # crea espera de 5min una señal para cfn-signal
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT5M
+    # define cómo configurar la instancia
+    Metadata:
+      AWS::CloudFormation::Authentication:
+        S3AccessCreds:
+          type: S3
+          roleName:
+            Ref: Ec2InstanceIamRole
+          buckets:
+            - wau-cfn-templates
+      AWS::CloudFormation::Init:
+        configSets:
+          LSVPNec2_install:
+            - "install_cfn"
+            - "install_epel"
+            - "install_admin_packages"
+            - "install_awscli_v2"
+            - "install_banner"
+            - "secure_ssh"
+        install_cfn:
+          # order: packages, groups, users, sources, files, commands, and then services.
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                interval=1
+              mode: "000400"
+              owner: "root"
+              group: "root"
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.Ec2Instance.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource Ec2Instance --configsets LSVPNec2_install --region ${AWS::Region}
+                runas=root
+              mode: "000400"
+              owner: "root"
+              group: "root"
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+        install_epel:
+          # order: packages, groups, users, sources, files, commands, and then services.
+          commands:
+            01_install_epel:
+              command: "amazon-linux-extras install epel -y"
+              ignoreErrors: "false"
+            02_run_yum_update:
+              command: "yum -y update"
+              ignoreErrors: "false"
+        install_admin_packages:
+          # order: packages, groups, users, sources, files, commands, and then services.
+          packages:
+            #  order: rpm, yum/apt, and then rubygems and python
+            yum:
+              bash-completion: []
+              htop: []
+              iperf3: []
+              jq: []
+              mtr: []
+              ncdu: []
+              nmap: []
+              tcpdump: []
+              telnet: []
+          files:
+            "/etc/profile.d/nano.sh":
+              content: |
+                ### NANO DEFAULT EDITOR ###
+                export VISUAL=nano
+                export EDITOR=nano
+              mode: "000400"
+              owner: "root"
+              group: "root"
+        install_awscli_v2:
+          # order: packages, groups, users, sources, files, commands, and then services.
+          files:
+            "/tmp/bash-scripts/install-awscli-v2.sh":
+              source: "https://wau-cfn-templates.s3.amazonaws.com/prod/clientes/farasi/bash-scripts/install-awscli-v2.sh"
+              mode: "000755"
+              owner: "root"
+              group: "root"
+              authentication: S3AccessCreds
+          commands:
+            01_bash_awscliv2:
+              command: "sh install-awscli-v2.sh"
+              cwd: "/tmp/bash-scripts/"
+              ignoreErrors: "false"
+            02_rm_awscliv2:
+              command: "rm -rf install-awscli-v2.sh"
+              cwd: "/tmp/bash-scripts/"
+              ignoreErrors: "false"
+            03_rm_awscliv2tmp:
+              command: "rm -rf aws awscliv2.zip"
+              cwd: "/tmp/"
+              ignoreErrors: "false"
+        install_banner:
+          # order: packages, groups, users, sources, files, commands, and then services.
+          files:
+            "/tmp/bash-scripts/banner-farasi-imdsv2-v01.sh":
+              source: "https://wau-cfn-templates.s3.amazonaws.com/prod/clientes/farasi/bash-scripts/banner-farasi-imdsv2-v01.sh"
+              mode: "000755"
+              owner: "root"
+              group: "root"
+              authentication: S3AccessCreds
+          commands:
+            01_bash_banner:
+              command: "sh banner-farasi-imdsv2-v01.sh"
+              cwd: "/tmp/bash-scripts/"
+              ignoreErrors: "false"
+            02_rm_banner:
+              command: "rm -rf banner-farasi-imdsv2-v01.sh"
+              cwd: "/tmp/bash-scripts/"
+              ignoreErrors: "false"
+        secure_ssh:
+          # order: packages, groups, users, sources, files, commands, and then services.
+          files:
+            "/tmp/bash-scripts/secure-ssh.sh":
+              source: "https://wau-cfn-templates.s3.amazonaws.com/prod/clientes/farasi/bash-scripts/secure-ssh.sh"
+              mode: "000755"
+              owner: "root"
+              group: "root"
+              authentication: S3AccessCreds
+          commands:
+            01_bash_secure_ssh_service:
+              command: "sh secure-ssh.sh"
+              cwd: "/tmp/bash-scripts/"
+              ignoreErrors: "false"
+            02_rm_secure_ssh_service:
+              command: "rm -rf secure-ssh.sh"
+              cwd: "/tmp/bash-scripts/"
+              ignoreErrors: "false"
+    Properties:
+      ImageId: !Ref Ec2InstanceAmiId
+      IamInstanceProfile: !Ref Ec2InstanceIamProfile
+      InstanceType: !Ref Ec2InstanceType
+      CreditSpecification:
+        CPUCredits: unlimited
+      KeyName: !Ref Ec2InstanceKeypairName
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref Ec2Eni
+          DeviceIndex: '0'
+      BlockDeviceMappings:
+        # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/device_naming.html
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            VolumeType: 'gp3'
+            VolumeSize: !Ref Ec2InstanceRootVolumeSize
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-01"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # Logger
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+          # yum repository metadata Clean up
+          yum clean all
+          # Updating OS
+          yum -y update
+          # Update aws-cfn-bootstrap to the latest
+          yum -y install aws-cfn-bootstrap
+          # Call cfn-init script to install files and packages
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource Ec2Instance --configsets LSVPNec2_install --region ${AWS::Region}
+          # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+          /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+          # Call cfn-signal script to signal the status from cfn-init (via $?)
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource Ec2Instance --region ${AWS::Region}
+# Outputs
+Outputs:
+  StackName:
+    Description: 'Stack Name'
+    Value: !Sub "${AWS::StackName}"
+  Ec2InstanceID:
+    Description: 'EC2 Instance ID'
+    Value: !Ref Ec2Instance
+    Export:
+        Name: !Sub "${AWS::StackName}-INSTANCE-ID"
+  Ec2InstancePRVIP:
+    Description: 'EC2 Instance Private Address'
+    Value: !GetAtt Ec2Instance.PrivateIp
+    Export:
+        Name: !Sub "${AWS::StackName}-INSTANCE-Private-IP"
+  Ec2InstanceSUBNETID:
+    Description: 'EC2 Instance Subnet ID'
+    Value: !Ref Ec2Subnet
+    Export:
+        Name: !Sub "${AWS::StackName}-INSTANCE-SUBNET-ID"
